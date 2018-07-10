@@ -2,10 +2,10 @@ import functools
 import logging
 import json
 import urllib
-import re
+#import re
 #from operator import itemgetter
 from google.appengine.api import urlfetch
-from google.appengine.ext import ndb
+#from google.appengine.ext import ndb
 import time
 import webapp2
 from StringIO import StringIO
@@ -16,21 +16,50 @@ import cloudstorage as gcs
 from google.appengine.api import app_identity
 
 
-#import zipfile
 
 localtime = time.asctime( time.localtime(time.time()) )
 housetypes = ["hres", "hr", "hjres", "hconres"]
 senatetypes = ["sres", "sjres", "sconres", "s"]
 
-def storeJson(mykey, myData):
-    gotJson = myJson.query(myJson.applicationName==mykey).fetch()
-    if len(gotJson) > 0:
-        baseline = gotJson[0]
-        baseline.json = myData
-        baseline.put()
+def writeFile(filename, myData):
+    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
+    write_retry_params = gcs.RetryParams(backoff_factor=1.1)
+    bucket = '/' + bucket_name
+    myfilename = bucket + '/' + filename
+    gcs_file = gcs.open(myfilename,
+                  'w',
+                  content_type='text/plain',
+                  options={'x-goog-meta-foo': 'foo',
+                           'x-goog-meta-bar': 'bar'},
+                  retry_params=write_retry_params)
+    gcs_file.write(myData)
+    gcs_file.close()
+
+def getFile(congress, chamber):
+    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
+    bucket = '/' + bucket_name
+    fetchfilenameStem = congress + '_' + chamber
+    filename = bucket + '/' + fetchfilenameStem
+    gcs_file = gcs.open(filename)
+    contents = gcs_file.read()
+    myJson = json.loads(contents)
+    gcs_file.close()
+    return myJson
+
+def addItems(mydict, subject, member, sponsortype, howmany):
+    if subject not in mydict:
+        mydict[subject] = {}
+    #if "total" in mydict[subject]:
+    #    mydict[subject]["total"] += 1
+    #else:
+    #    mydict[subject]["total"] = 1
+    if member not in mydict[subject]:
+        mydict[subject][member] = {}
+    if sponsortype in mydict[subject][member]:
+        mydict[subject][member][sponsortype] += howmany
     else:
-        baselinejson = myJson(applicationName=mykey, json=myData)
-        baselinejson.put()
+        mydict[subject][member][sponsortype] = howmany
+
 
 def fetchZips(congress, chamber):
     def addSubject(subject, sponsors, cosponsors, type):
@@ -106,18 +135,16 @@ def fetchZips(congress, chamber):
         except urlfetch.Error:
                 logging.exception('Caught exception fetching url')
 
-    mykeystem = congress + "-" + chamber
-    storeJson(mykeystem + "-policies", json.dumps(allPolicies))
-    storeJson(mykeystem + "-subjects", json.dumps(dictSubjects))
+    allHeadings["date_created"] = localtime
+    allHeadings["legislative_subjects"] = dictSubjects
+    allHeadings["policy_areas"] = allPolicies
+
+    filenameStem = congress + "_" + chamber
+    writeFile(filenameStem, json.dumps(allHeadings))
+    #writeFile("subjectsbymember_" + filenameStem, json.dumps(dictSubjects))
 
     return "All done!"
-        #yearCounts['counts'] = sorted(yearCounts['counts'], key=itemgetter('year'))
-    #prettiness = json.dumps(yearCounts, sort_keys=True, indent=4)
-    #return prettiness
 
-class myJson(ndb.Model):
-    applicationName = ndb.StringProperty()
-    json = ndb.TextProperty()
 
 class MainPage(webapp2.RequestHandler):
     def get(self):
@@ -126,18 +153,76 @@ class MainPage(webapp2.RequestHandler):
         self.response.write(localtime)
         bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
         self.response.write('Using bucket name: ' + bucket_name + '\n\n')
-        #mystatus = fetchZips("113", "house")
-        #self.response.write(mystatus)
 
-class BuildBaseCounts(webapp2.RequestHandler):
+
+class BuildSubjects(webapp2.RequestHandler):
     def get(self):
         congress = self.request.get('congress')
         chamber = self.request.get('chamber')
         buildIt = fetchZips(congress, chamber)
         self.response.write(buildIt)
 
+class BuildAllSubjects(webapp2.RequestHandler):
+    def get(self):
+        testarray = []
+        congresses = ['113', '114', '115']
+        allHouse = []
+        houseTotals = {}
+        houseTotals["date_created"] = localtime
+        houseTotals["legislative_subjects"] = {}
+        houseTotals["policy_areas"] = {}
+
+        allSenate = []
+        senateTotals = {}
+        senateTotals["date_created"] = localtime
+        senateTotals["legislative_subjects"] = {}
+        senateTotals["policy_areas"] = {}
+
+        for congress in congresses:
+            myHresponse = getFile(congress, "house")
+            allHouse.append(myHresponse)
+            mySresponse = getFile(congress, "senate")
+            allSenate.append(mySresponse)
+
+        for houseDict in allHouse:
+            for subject in houseDict["legislative_subjects"]:
+                for member in houseDict["legislative_subjects"][subject]:
+                    myboolean = isinstance(houseDict["legislative_subjects"][subject][member], dict)
+                    if not myboolean:
+                        testarray.append("False: " + subject + ": " + member)
+                    #if houseDict["legislative_subjects"][subject][member]["cosponsored"] is not None:
+                    #    testarray.append(houseDict["legislative_subjects"][subject][member]["cosponsored"])
+                    #for sponsortype in houseDict["legislative_subjects"][subject]:
+                        #testarray.append(sponsortype)
+                    #if "cosponsored" in houseDict["legislative_subjects"][subject][member]:
+                        #currentNum = houseDict["legislative_subjects"][subject][member]["cosponsored"]
+                        #addItems(houseTotals["legislative_subjects"], subject, member, 'cosponsored', houseDict["legislative_subjects"][subject][member]["cosponsored"])
+                    #if "sponsored" in houseDict["legislative_subjects"][subject][member]:
+                    #    addItems(houseTotals["legislative_subjects"], subject, member, 'sponsored', houseDict["legislative_subjects"][subject][member]["sponsored"])
+
+        self.response.write(testarray)
+
+
+class FetchSubjects(webapp2.RequestHandler):
+    def get(self):
+        self.response.headers['Content-Type'] = 'application/json'
+        bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
+        bucket = '/' + bucket_name
+        congress = self.request.get('congress')
+        chamber = self.request.get('chamber')
+        #subjecttype = self.request.get('subjecttype')
+        fetchfilenameStem = congress + '_' + chamber
+        filename = bucket + '/' + fetchfilenameStem
+
+        gcs_file = gcs.open(filename)
+        contents = gcs_file.read()
+        gcs_file.close()
+        self.response.write(contents)
 
 app = webapp2.WSGIApplication([
     ('/', MainPage),
-    ('/buildbasecounts', BuildBaseCounts),
+    ('/buildsubjects', BuildSubjects),
+    ('/buildallsubjects', BuildAllSubjects),
+    ('/fetchsubjects', FetchSubjects),
+
 ], debug=True)
