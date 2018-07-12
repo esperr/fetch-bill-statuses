@@ -18,8 +18,21 @@ from google.appengine.api import app_identity
 
 
 localtime = time.asctime( time.localtime(time.time()) )
+congresses = ['113', '114', '115']
 housetypes = ["hres", "hr", "hjres", "hconres"]
+housetypes2 = ["hres"]
+
 senatetypes = ["sres", "sjres", "sconres", "s"]
+
+def addItems(mydict, subject, member, sponsortype, howmany):
+    if subject not in mydict:
+        mydict[subject] = {}
+    if member not in mydict[subject]:
+        mydict[subject][member] = {}
+    if sponsortype in mydict[subject][member]:
+        mydict[subject][member][sponsortype] += howmany
+    else:
+        mydict[subject][member][sponsortype] = howmany
 
 def writeFile(filename, myData):
     bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
@@ -42,26 +55,11 @@ def getFile(congress, chamber):
     filename = bucket + '/' + fetchfilenameStem
     gcs_file = gcs.open(filename)
     contents = gcs_file.read()
-    myJson = json.loads(contents)
     gcs_file.close()
+    myJson = json.loads(contents)
     return myJson
 
-def addItems(mydict, subject, member, sponsortype, howmany):
-    if subject not in mydict:
-        mydict[subject] = {}
-    #if "total" in mydict[subject]:
-    #    mydict[subject]["total"] += 1
-    #else:
-    #    mydict[subject]["total"] = 1
-    if member not in mydict[subject]:
-        mydict[subject][member] = {}
-    if sponsortype in mydict[subject][member]:
-        mydict[subject][member][sponsortype] += howmany
-    else:
-        mydict[subject][member][sponsortype] = howmany
-
-
-def fetchZips(congress, chamber):
+def fetchZips(targetList):
     def addSubject(subject, sponsors, cosponsors, type):
         if type == "policy":
             rootdict = allPolicies
@@ -117,16 +115,11 @@ def fetchZips(congress, chamber):
     allHeadings = {}
     dictSubjects = {}
     allPolicies = {}
-    if chamber == "house":
-        locationList = housetypes
-    if chamber == "senate":
-        locationList = housetypes
 
-    for mydir in locationList:
+    for target in targetList:
         try:
             validate_certificate = 'true'
-            zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + mydir + "/BILLSTATUS-" + congress + "-" + mydir + ".zip"
-            result = urlfetch.fetch(zipurl)
+            result = urlfetch.fetch(target)
             if result.status_code == 200:
                 zf = ZipFile(StringIO(result.content))
                 parseZip(zf)
@@ -139,11 +132,7 @@ def fetchZips(congress, chamber):
     allHeadings["legislative_subjects"] = dictSubjects
     allHeadings["policy_areas"] = allPolicies
 
-    filenameStem = congress + "_" + chamber
-    writeFile(filenameStem, json.dumps(allHeadings))
-    #writeFile("subjectsbymember_" + filenameStem, json.dumps(dictSubjects))
-
-    return "All done!"
+    return allHeadings
 
 
 class MainPage(webapp2.RequestHandler):
@@ -157,50 +146,48 @@ class MainPage(webapp2.RequestHandler):
 
 class BuildSubjects(webapp2.RequestHandler):
     def get(self):
+        targetList = []
         congress = self.request.get('congress')
         chamber = self.request.get('chamber')
-        buildIt = fetchZips(congress, chamber)
+        #moving the directory picking logic to here
+        if chamber == "house":
+            locationList = housetypes
+        if chamber == "senate":
+            locationList = senatetypes
+
+        for location in locationList:
+            zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
+            targetList.append(zipurl)
+
+        buildIt = fetchZips(targetList)
+        filenameStem = congress + "_" + chamber
+        writeFile(filenameStem, json.dumps(buildIt))
+
         self.response.write(buildIt)
 
 class BuildAllSubjects(webapp2.RequestHandler):
-    def get(self):
-        testarray = []
-        congresses = ['113', '114', '115']
-        allHouse = []
-        houseTotals = {}
-        houseTotals["date_created"] = localtime
-        houseTotals["legislative_subjects"] = {}
-        houseTotals["policy_areas"] = {}
+        def get(self):
+            targetList = []
 
-        allSenate = []
-        senateTotals = {}
-        senateTotals["date_created"] = localtime
-        senateTotals["legislative_subjects"] = {}
-        senateTotals["policy_areas"] = {}
+            for location in housetypes:
+                for congress in congresses:
+                    zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
+                    targetList.append(zipurl)
 
-        for congress in congresses:
-            myHresponse = getFile(congress, "house")
-            allHouse.append(myHresponse)
-            mySresponse = getFile(congress, "senate")
-            allSenate.append(mySresponse)
+            buildIt = fetchZips(targetList)
+            filenameStem = "all" + "_" + "house"
+            writeFile(filenameStem, json.dumps(buildIt))
 
-        for houseDict in allHouse:
-            for subject in houseDict["legislative_subjects"]:
-                for member in houseDict["legislative_subjects"][subject]:
-                    myboolean = isinstance(houseDict["legislative_subjects"][subject][member], dict)
-                    if not myboolean:
-                        testarray.append("False: " + subject + ": " + member)
-                    #if houseDict["legislative_subjects"][subject][member]["cosponsored"] is not None:
-                    #    testarray.append(houseDict["legislative_subjects"][subject][member]["cosponsored"])
-                    #for sponsortype in houseDict["legislative_subjects"][subject]:
-                        #testarray.append(sponsortype)
-                    #if "cosponsored" in houseDict["legislative_subjects"][subject][member]:
-                        #currentNum = houseDict["legislative_subjects"][subject][member]["cosponsored"]
-                        #addItems(houseTotals["legislative_subjects"], subject, member, 'cosponsored', houseDict["legislative_subjects"][subject][member]["cosponsored"])
-                    #if "sponsored" in houseDict["legislative_subjects"][subject][member]:
-                    #    addItems(houseTotals["legislative_subjects"], subject, member, 'sponsored', houseDict["legislative_subjects"][subject][member]["sponsored"])
+            for location in senatetypes:
+                for congress in congresses:
+                    zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
+                    targetList.append(zipurl)
 
-        self.response.write(testarray)
+            buildSen = fetchZips(targetList)
+            filenameStem = "all" + "_" + "senate"
+            writeFile(filenameStem, json.dumps(buildSen))
+
+            self.response.write("All done!")
 
 
 class FetchSubjects(webapp2.RequestHandler):
