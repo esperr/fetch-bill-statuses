@@ -1,0 +1,8 @@
+cron:
+- description: "Bill Status Updates"
+  url: /updatesubjects
+  schedule: every day 00:30
+  timezone: America/New_York
+  retry_parameters:
+    min_backoff_seconds: 200
+    max_doublings: 5

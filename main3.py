@@ -1,3 +1,4 @@
+#This approach takes too long!
 import functools
 import logging
 import json
@@ -9,7 +10,7 @@ from google.appengine.api import urlfetch
 import time
 import webapp2
 from StringIO import StringIO
-from zipfile import ZipFile
+#from zipfile import ZipFile
 import xml.etree.ElementTree as etree
 import os
 import cloudstorage as gcs
@@ -99,43 +100,52 @@ def addSubject(subject, sponsors, cosponsors, type):
                 else:
                     rootdict[subject][bioid]["cosponsored"] = 1
 
-def parseZip(zf):
-    for myname in zf.namelist():
-        myfile = zf.open(myname)
-        tree = etree.parse(myfile)
-        root = tree.getroot()
-        #myfile = zf.read(myname)
-        #root = etree.fromstring(myfile)
-        allsponsors = root.findall('.bill/sponsors/item')
-        allcosponsors = root.findall('.bill/cosponsors/item')
-        policynode = root.find('.//policyArea/name')
-        if policynode is not None:
-            policy = policynode.text.replace(" ","_")
-            addSubject(policy, allsponsors, allcosponsors, "policy")
-        allsubjects = root.findall('.//billSubjects/legislativeSubjects/item')
-        for subitem in allsubjects:
-            subject = subitem.find('name').text.replace(" ","_")
-            addSubject(subject, allsponsors, allcosponsors, "legsubject")
+def handle_result(rpc):
+    result = rpc.get_result()
+    logging.info('Handling RPC in callback: result {}'.format(result))
 
-def fetchZips(targetList):
-    #testfetch.append(allsponsors)
+    #root = etree.fromstring(result.content)
+    #allsponsors = root.findall('.bill/sponsors/item')
+    #allcosponsors = root.findall('.bill/cosponsors/item')
+    #policynode = root.find('.//policyArea/name')
+    #if policynode is not None:
+    #    policy = policynode.text.replace(" ","_")
+    #    addSubject(policy, allsponsors, allcosponsors, "policy")
+    #allsubjects = root.findall('.//billSubjects/legislativeSubjects/item')
+    #for subitem in allsubjects:
+    #    subject = subitem.find('name').text.replace(" ","_")
+    #    addSubject(subject, allsponsors, allcosponsors, "legsubject")
+
+
+def fetchFiles(targetList):
+    fileList = []
     for target in targetList:
         try:
             validate_certificate = 'true'
-            result = urlfetch.fetch(target)
+            headers = {'Accept': 'application/json'}
+            result = urlfetch.fetch(
+                url=target,
+                method=urlfetch.GET,
+                headers=headers)
             if result.status_code == 200:
-                zf = ZipFile(StringIO(result.content))
-                parseZip(zf)
+                myfiles = json.loads(result.content)
+                for myfile in myfiles['files']:
+                    fileList.append(myfile['link'])
+
             else:
-                return result.status_code
+                fileList.append("farts!")
         except urlfetch.Error:
-                logging.exception('Caught exception fetching url')
+                fileList.append("Error!!!")
 
-    allHeadings["date_created"] = localtime
-    allHeadings["legislative_subjects"] = dictSubjects
-    allHeadings["policy_areas"] = allPolicies
 
-    return allHeadings
+    #allHeadings["date_created"] = localtime
+    #allHeadings["legislative_subjects"] = dictSubjects
+    #allHeadings["policy_areas"] = allPolicies
+
+    #return allHeadings
+    logging.info("Number of files:")
+    logging.info(len(fileList))
+    return fileList
 
 
 class MainPage(webapp2.RequestHandler):
@@ -149,7 +159,7 @@ class MainPage(webapp2.RequestHandler):
 
 class BuildSubjects(webapp2.RequestHandler):
     def get(self):
-        logging.info('This is an info message')
+        #logging.info('This is an info message')
         logging.info(runtime.memory_usage())
         start = time.time()
         targetList = []
@@ -162,16 +172,31 @@ class BuildSubjects(webapp2.RequestHandler):
             locationList = senatetypes
 
         for location in locationList:
-            zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
-            targetList.append(zipurl)
+            statuses = "https://www.govinfo.gov/bulkdata/json/BILLSTATUS/" + congress + "/" + location
+            targetList.append(statuses)
 
-        buildIt = fetchZips(targetList)
-        filenameStem = congress + "_" + chamber
-        writeFile(filenameStem, json.dumps(buildIt))
+        buildIt = fetchFiles(targetList)
+        urls = ['http://www.google.com',
+        'http://www.github.com',
+        'http://www.travis-ci.org']
+
+        rpcs = []
+
+        for url in buildIt:
+            rpc = urlfetch.create_rpc()
+            rpc.callback = functools.partial(handle_result, rpc)
+            urlfetch.make_fetch_call(rpc, url)
+            rpcs.append(rpc)
+        #filenameStem = congress + "_" + chamber
+        #writeFile(filenameStem, json.dumps(buildIt))
+        for rpc in rpcs:
+            rpc.wait()
+
         end = time.time()
+        logging.info('Done waiting for RPCs')
+
         self.response.write(end - start)
-        self.response.write(runtime.memory_usage())
-        #self.response.write(buildIt)
+        self.response.write(buildIt)
 
 class BuildAllSubjects(webapp2.RequestHandler):
         def get(self):
@@ -185,10 +210,10 @@ class BuildAllSubjects(webapp2.RequestHandler):
 
             for location in housetypes:
                 for congress in congresses:
-                    zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
-                    targetList.append(zipurl)
+                    zipurl = "https://www.govinfo.gov/bulkdata/json/BILLSTATUS" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
+                    targetList.append("farts!")
 
-            buildIt = fetchZips(targetList)
+            buildIt = fetchFiles(targetList)
             filenameStem = "all" + "_" + "house"
             writeFile(filenameStem, json.dumps(buildIt))
             self.response.write("All done!")

@@ -8,61 +8,45 @@ from google.appengine.api import urlfetch
 #from google.appengine.ext import ndb
 import time
 import webapp2
-from StringIO import StringIO
-from zipfile import ZipFile
 import xml.etree.ElementTree as etree
 import os
 import cloudstorage as gcs
 from google.appengine.api import app_identity
-from google.appengine.api.runtime import runtime
 
 
 
 localtime = time.asctime( time.localtime(time.time()) )
 congresses = ['113', '114', '115']
 housetypes = ["hres", "hr", "hjres", "hconres"]
-housetypes2 = ["hres"]
-
 senatetypes = ["sres", "sjres", "sconres", "s"]
-testfetch = []
+#api_key = "oZf7Bv5rp9AVB9PoT7hKpCcO2dt4j80nslXRp56N"
+namespace = 'http://www.sitemaps.org/schemas/sitemap/0.9'
+billarray = []
+billset = set()
 allHeadings = {}
 dictSubjects = {}
 allPolicies = {}
 
-def addItems(mydict, subject, member, sponsortype, howmany):
-    if subject not in mydict:
-        mydict[subject] = {}
-    if member not in mydict[subject]:
-        mydict[subject][member] = {}
-    if sponsortype in mydict[subject][member]:
-        mydict[subject][member][sponsortype] += howmany
-    else:
-        mydict[subject][member][sponsortype] = howmany
 
-def writeFile(filename, myData):
-    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
-    write_retry_params = gcs.RetryParams(backoff_factor=1.1)
-    bucket = '/' + bucket_name
-    myfilename = bucket + '/' + filename
-    gcs_file = gcs.open(myfilename,
-                  'w',
-                  content_type='text/plain',
-                  options={'x-goog-meta-foo': 'foo',
-                           'x-goog-meta-bar': 'bar'},
-                  retry_params=write_retry_params)
-    gcs_file.write(myData)
-    gcs_file.close()
+def handle_result(rpc):
+    result = rpc.get_result()
+    root = etree.fromstring(result.content)
+    title = root.find('.bill/billNumber').text
+    billarray.append(title)
+    billset.add(title)
+    allsponsors = root.findall('.bill/sponsors/item')
+    allcosponsors = root.findall('.bill/cosponsors/item')
+    policynode = root.find('.//policyArea/name')
+    if policynode is not None:
+        policy = policynode.text.replace(" ","_")
+        addSubject(policy, allsponsors, allcosponsors, "policy")
+    allsubjects = root.findall('.//billSubjects/legislativeSubjects/item')
+    for subitem in allsubjects:
+        subject = subitem.find('name').text.replace(" ","_")
+        addSubject(subject, allsponsors, allcosponsors, "legsubject")
+    #logging.info('Handling RPC in callback')
 
-def getFile(congress, chamber):
-    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
-    bucket = '/' + bucket_name
-    fetchfilenameStem = congress + '_' + chamber
-    filename = bucket + '/' + fetchfilenameStem
-    gcs_file = gcs.open(filename)
-    contents = gcs_file.read()
-    gcs_file.close()
-    myJson = json.loads(contents)
-    return myJson
+rpcs = []
 
 def addSubject(subject, sponsors, cosponsors, type):
     if type == "policy":
@@ -99,43 +83,75 @@ def addSubject(subject, sponsors, cosponsors, type):
                 else:
                     rootdict[subject][bioid]["cosponsored"] = 1
 
-def parseZip(zf):
-    for myname in zf.namelist():
-        myfile = zf.open(myname)
-        tree = etree.parse(myfile)
-        root = tree.getroot()
-        #myfile = zf.read(myname)
-        #root = etree.fromstring(myfile)
-        allsponsors = root.findall('.bill/sponsors/item')
-        allcosponsors = root.findall('.bill/cosponsors/item')
-        policynode = root.find('.//policyArea/name')
-        if policynode is not None:
-            policy = policynode.text.replace(" ","_")
-            addSubject(policy, allsponsors, allcosponsors, "policy")
-        allsubjects = root.findall('.//billSubjects/legislativeSubjects/item')
-        for subitem in allsubjects:
-            subject = subitem.find('name').text.replace(" ","_")
-            addSubject(subject, allsponsors, allcosponsors, "legsubject")
+def addItems(mydict, subject, member, sponsortype, howmany):
+    if subject not in mydict:
+        mydict[subject] = {}
+    if member not in mydict[subject]:
+        mydict[subject][member] = {}
+    if sponsortype in mydict[subject][member]:
+        mydict[subject][member][sponsortype] += howmany
+    else:
+        mydict[subject][member][sponsortype] = howmany
 
-def fetchZips(targetList):
-    #testfetch.append(allsponsors)
+def writeFile(filename, myData):
+    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
+    write_retry_params = gcs.RetryParams(backoff_factor=1.1)
+    bucket = '/' + bucket_name
+    myfilename = bucket + '/' + filename
+    gcs_file = gcs.open(myfilename,
+                  'w',
+                  content_type='text/plain',
+                  options={'x-goog-meta-foo': 'foo',
+                           'x-goog-meta-bar': 'bar'},
+                  retry_params=write_retry_params)
+    gcs_file.write(myData)
+    gcs_file.close()
+
+def getFile(congress, chamber):
+    bucket_name = os.environ.get('BUCKET_NAME', app_identity.get_default_gcs_bucket_name())
+    bucket = '/' + bucket_name
+    fetchfilenameStem = congress + '_' + chamber
+    filename = bucket + '/' + fetchfilenameStem
+    gcs_file = gcs.open(filename)
+    contents = gcs_file.read()
+    gcs_file.close()
+    myJson = json.loads(contents)
+    return myJson
+
+def fetchStatuses(targetList):
+
+
+    def parseFiles(listFiles):
+        pass
+
+        #testfetch.append(allsponsors)
+
     for target in targetList:
         try:
             validate_certificate = 'true'
             result = urlfetch.fetch(target)
             if result.status_code == 200:
-                zf = ZipFile(StringIO(result.content))
-                parseZip(zf)
+                root = etree.fromstring(result.content)
+                for loc in root.findall('.//s:loc', namespaces=dict(s=namespace)):
+                    url = loc.text
+                    rpc = urlfetch.create_rpc(deadline=300)
+                    rpc.callback = functools.partial(handle_result, rpc)
+                    urlfetch.make_fetch_call(rpc, url)
+                    rpcs.append(rpc)
             else:
                 return result.status_code
         except urlfetch.Error:
                 logging.exception('Caught exception fetching url')
 
-    allHeadings["date_created"] = localtime
-    allHeadings["legislative_subjects"] = dictSubjects
-    allHeadings["policy_areas"] = allPolicies
+    #allHeadings["date_created"] = localtime
+    #allHeadings["legislative_subjects"] = dictSubjects
+    #allHeadings["policy_areas"] = allPolicies
 
-    return allHeadings
+    #return statusFiles
+    for rpc in rpcs:
+        rpc.wait()
+
+    logging.info('Done waiting for RPCs')
 
 
 class MainPage(webapp2.RequestHandler):
@@ -149,8 +165,6 @@ class MainPage(webapp2.RequestHandler):
 
 class BuildSubjects(webapp2.RequestHandler):
     def get(self):
-        logging.info('This is an info message')
-        logging.info(runtime.memory_usage())
         start = time.time()
         targetList = []
         congress = self.request.get('congress')
@@ -162,16 +176,19 @@ class BuildSubjects(webapp2.RequestHandler):
             locationList = senatetypes
 
         for location in locationList:
-            zipurl = "https://www.gpo.gov/fdsys/bulkdata/BILLSTATUS/" + congress + "/" + location + "/BILLSTATUS-" + congress + "-" + location + ".zip"
-            targetList.append(zipurl)
+            fileList = "https://www.gpo.gov/smap/bulkdata/BILLSTATUS/" + congress + location + "/sitemap.xml"
+            #fileList = "https://www.govinfo.gov/bulkdata/json/BILLSTATUS/" + congress + "/" + location
+            targetList.append(fileList)
+        testtargets = ["https://www.gpo.gov/smap/bulkdata/BILLSTATUS/114hr/sitemap.xml"]
+        buildIt = fetchStatuses(testtargets)
+        #filenameStem = congress + "_" + chamber
+        #writeFile(filenameStem, json.dumps(buildIt))
 
-        buildIt = fetchZips(targetList)
-        filenameStem = congress + "_" + chamber
-        writeFile(filenameStem, json.dumps(buildIt))
         end = time.time()
         self.response.write(end - start)
-        self.response.write(runtime.memory_usage())
-        #self.response.write(buildIt)
+        self.response.write("Set: " +  str(len(billset)))
+        self.response.write("Array: " + str(len(billarray)))
+
 
 class BuildAllSubjects(webapp2.RequestHandler):
         def get(self):
