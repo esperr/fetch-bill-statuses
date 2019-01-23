@@ -6,3 +6,10 @@ cron:
   retry_parameters:
     min_backoff_seconds: 200
     max_doublings: 5
+- description: "Update Subject List"
+  url: /buildsubjectlist
+  schedule: every day 02:30
+  timezone: America/New_York
+  retry_parameters:
+    min_backoff_seconds: 200
+    max_doublings: 5
