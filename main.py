@@ -10,22 +10,19 @@ import xml.etree.ElementTree as etree
 import os
 import cloudstorage as gcs
 import re
+import config
 from google.appengine.api import app_identity
 
 from google.appengine.ext import ndb
 from StringIO import StringIO
 
-
 localtime = time.asctime( time.localtime(time.time()) )
-#congresses = ['113', '114', '115']
-
-#api_key = "oZf7Bv5rp9AVB9PoT7hKpCcO2dt4j80nslXRp56N"
 namespace = 'http://www.sitemaps.org/schemas/sitemap/0.9'
 modsnamespace = 'http://www.loc.gov/standards/mods/v3/mods.xsd'
 todaysdate = datetime.date.today()
 
-startcongress = 113
-startcongressdate = datetime.date(2013, 1, 3)
+startcongress = 108
+startcongressdate = datetime.date(2003, 1, 3)
 
 def congresslist():
     mylist = [startcongress]
@@ -59,6 +56,21 @@ def getFile(filename):
     contents = gcs_file.read()
     gcs_file.close()
     return contents
+
+def getRemoteNom(congress):
+    urlfetch.set_default_fetch_deadline(60)
+    url = "https://voteview.com/static/data/out/members/HS" + congress +"_members.json"
+    try:
+        validate_certificate = 'true'
+        result = urlfetch.fetch(url)
+        if result.status_code == 200:
+            myText = result.content
+            return myText
+        else:
+            return result.status_code
+    except urlfetch.Error:
+        logging.exception('Caught exception fetching url')
+
 
 class BillStatus(ndb.Model):
     #title = ndb.StringProperty()
@@ -126,18 +138,19 @@ def fetchStatuses(urllist):
     for rpc in rpcs:
         rpc.wait()
     logging.info('Done waiting for RPCs')
-    message = "Done!" + str(len(badurls)) + " bad URLs: " + str(badurls)
-    return message
+    #message = "Done!" + str(len(badurls)) + " bad URLs: " + str(badurls)
+    return badurls
 
 
 class MainPage(webapp2.RequestHandler):
     def get(self):
+        self.response.headers['Content-Type'] = 'application/json'
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
         counts = {}
         billtypes = ["sres", "sjres", "sconres", "s", "hres", "hr", "hjres", "hconres"]
-        #congresses = ["113", "114", "115"]
         congresses = congresslist()
         self.response.headers['Content-Type'] = 'application/json'
-        self.response.headers['Access-Control-Allow-Origin'] = '*'        #self.response.write(localtime)
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
         for congress in congresses:
             congress = str(congress)
             counts[congress] = {}
@@ -150,6 +163,8 @@ class MainPage(webapp2.RequestHandler):
 
 class RebuildSubjects(webapp2.RequestHandler):
     def get(self):
+        self.response.headers['Content-Type'] = 'application/json'
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
         urllist = []
         del urllist[:]
         urllistpart = []
@@ -161,7 +176,7 @@ class RebuildSubjects(webapp2.RequestHandler):
         #this is kinda hacky, but much simpler than going back and forth through the API
         target = "https://www.gpo.gov/smap/bulkdata/BILLSTATUS/" + congress + type + "/sitemap.xml"
         validate_certificate = 'true'
-        result = urlfetch.fetch(target)
+        result = urlfetch.fetch(target, deadline=10000)
         if result.status_code == 200:
             root = etree.fromstring(result.content)
             for loc in root.findall('.//s:loc', namespaces=dict(s=namespace)):
@@ -172,9 +187,15 @@ class RebuildSubjects(webapp2.RequestHandler):
         myquery = BillStatus.query(BillStatus.congress == congress)
         myquery = myquery.filter(BillStatus.type == type.upper())
         count = myquery.count()
-        self.response.write(buildIt)
-        self.response.write(str(len(urllist)) + " source records. ")
-        self.response.write(str(count) + " records added so far...")
+        myresponse = {}
+        myresponse["badurls"] = buildIt
+        myresponse["total_records"] = len(urllist)
+        myresponse["added_so_far"] = count
+        self.response.write(json.dumps(myresponse,indent=4))
+        #self.response.write(buildIt)
+        #self.response.write(str(len(urllist)) + " source records. ")
+        #self.response.write(str(count) + " records added so far...")
+
 
 class PutSingleBill(webapp2.RequestHandler):
     def get(self):
@@ -221,7 +242,7 @@ class BuildMembers(webapp2.RequestHandler):
         self.response.headers['Content-Type'] = 'application/json'
 
         def getMembers(packageId):
-            sourceurl = "https://api.govinfo.gov/packages/" + packageId + "/mods?api_key=oZf7Bv5rp9AVB9PoT7hKpCcO2dt4j80nslXRp56N"
+            sourceurl = "https://api.govinfo.gov/packages/" + packageId + "/mods?" + config.api_key
             logging.info(sourceurl)
             validate_certificate = 'true'
             result = urlfetch.fetch(sourceurl)
@@ -263,7 +284,7 @@ class BuildMembers(webapp2.RequestHandler):
                         allmembers[bioid]["currentmember"] = "TRUE"
 
         allmembers = {}
-        sourceurl = "https://api.govinfo.gov/collections/CDIR/2018-01-28T20%3A18%3A10Z?offset=0&pageSize=100&api_key=oZf7Bv5rp9AVB9PoT7hKpCcO2dt4j80nslXRp56N"
+        sourceurl = "https://api.govinfo.gov/collections/CDIR/2018-01-28T20%3A18%3A10Z?offset=0&pageSize=100&" + config.api_key
         validate_certificate = 'true'
         result = urlfetch.fetch(sourceurl)
         if result.status_code == 200:
@@ -286,9 +307,10 @@ class FetchMemberList(webapp2.RequestHandler):
 
 class BuildSubjectList(webapp2.RequestHandler):
     def get(self):
+        congress = self.request.get('congress')
         policies = []
         legislativesubjects = set()
-        congresses = congresslist()
+        #congresses = congresslist()
         subjectList = { "policies": {}, "legislativesubjects": {} }
         distinctpolicy = BillStatus.query(projection=["policy"],distinct=True)
         for result in distinctpolicy:
@@ -303,27 +325,64 @@ class BuildSubjectList(webapp2.RequestHandler):
         for policy in policies:
             subjectList["policies"][policy] = {}
             mytotal = BillStatus.query(BillStatus.policy == policy)
-            subjectList["policies"][policy]['total'] = mytotal.count()
-            for congress in congresses:
-                subjectList["policies"][policy][str(congress)] = mytotal.filter(BillStatus.congress == str(congress)).count()
+            if congress == "all":
+                subjectList["policies"][policy]['total'] = mytotal.count()
+            else:
+                subjectList["policies"][policy][congress] = mytotal.filter(BillStatus.congress == congress).count()
 
         for subject in legislativesubjects:
             subjectList["legislativesubjects"][subject] = {}
             mytotal = BillStatus.query(BillStatus.legislativesubjects == subject)
-            subjectList["legislativesubjects"][subject]['total'] = mytotal.count()
-            for congress in congresses:
-                subjectList["legislativesubjects"][subject][str(congress)] = mytotal.filter(BillStatus.congress == str(congress)).count()
+            if congress == "all":
+                subjectList["legislativesubjects"][subject]['total'] = mytotal.count()
+            else:
+                subjectList["legislativesubjects"][subject][congress] = mytotal.filter(BillStatus.congress == congress).count()
 
         self.response.headers['Content-Type'] = 'application/json'
         self.response.headers['Access-Control-Allow-Origin'] = '*'
         self.response.write(json.dumps(subjectList,indent=4))
-        writeFile("subjectList", json.dumps(subjectList))
+        writeFile("subjectList_" + congress, json.dumps(subjectList))
+
+class BuildSubjectList2(webapp2.RequestHandler):
+    def get(self):
+        congress = self.request.get('congress')
+        subjectList = {}
+        subjectList["policies"] = {}
+        subjectList["legislativesubjects"] = {}
+
+        allBills = BillStatus.query(projection=["legislativesubjects", "policy", "congress"])
+        #allpolicies = BillStatus.query(projection=["policy"])
+        #allsubjects = BillStatus.query(projection=["legislativesubjects"])
+        for bill in allBills:
+            if len(bill.policy) > 1:
+                if bill.policy in subjectList["policies"]:
+                    subjectList["policies"][bill.policy] = subjectList["policies"][bill.policy] + 1
+                else:
+                    subjectList["policies"][bill.policy] = 1
+
+            mysubjects = bill.legislativesubjects
+            for subject in mysubjects:
+                if subject in subjectList["legislativesubjects"]:
+                    subjectList["legislativesubjects"][subject] = subjectList["legislativesubjects"][subject] + 1
+                else:
+                    subjectList["legislativesubjects"][subject] = 1
+
+
+        self.response.headers['Content-Type'] = 'application/json'
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
+        self.response.write(json.dumps(subjectList,indent=4))
+        #writeFile("subjectList_" + congress, json.dumps(subjectList))
+
 
 class FetchSubjectList(webapp2.RequestHandler):
     def get(self):
         self.response.headers['Content-Type'] = 'application/json'
         self.response.headers['Access-Control-Allow-Origin'] = '*'
-        myJson = getFile("subjectList")
+        congress = self.request.get('congress')
+        if congress == "":
+            myJson = getFile("subjectList")
+        else:
+            myJson = getFile("subjectList_" + congress)
         self.response.write(myJson)
 
 
@@ -428,6 +487,13 @@ class ShowRecords(webapp2.RequestHandler):
             self.response.write(bill)
             self.response.write("<br /><br />")
 
+class FetchNomScores(webapp2.RequestHandler):
+    def get(self):
+        congress = self.request.get('congress')
+        self.response.headers = { "Content-Type": "application/json; charset=UTF-8",
+         "Access-Control-Allow-Origin": "*" }
+        myJson = getRemoteNom(congress)
+        self.response.write(myJson)
 
 app = webapp2.WSGIApplication([
     ('/', MainPage),
@@ -441,5 +507,6 @@ app = webapp2.WSGIApplication([
     ('/subjectsearch', FetchSubject),
     ('/membersearch', FetchMember),
     ('/addsingle', PutSingleBill),
+    ('/fetchnomscores', FetchNomScores),
 
 ], debug=True)
